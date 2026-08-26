@@ -38,8 +38,8 @@ th{color:var(--muted)}.empty{color:var(--muted);text-align:center;padding:26px 0
 </div>
 <div class="scanner">
 <video id="video" playsinline muted></video>
-<div class="guide"></div>
-<div class="hint">將條碼置於框內</div>
+<div class="guide" style="width:68%;height:28%"></div>
+<div class="hint">條碼靠近一些，佔框內約 1/2</div>
 </div>
 <div class="actions">
 <button id="startBtn">開始即時掃描</button>
@@ -97,6 +97,41 @@ function render(){
 document.getElementById('tbody').onclick=e=>{const b=e.target.closest('[data-i]');if(!b)return;const a=items();a.splice(+b.dataset.i,1);save(a);render()}
 function gotCode(raw){if(!raw)return;barcode.value=raw;statusEl.textContent='已讀取：'+raw;if(navigator.vibrate)navigator.vibrate(60);drugName.focus()}
 
+function makeZXingReader(){
+  if(!window.ZXing) return null;
+  const hints=new Map();
+  if(ZXing.DecodeHintType?.TRY_HARDER) hints.set(ZXing.DecodeHintType.TRY_HARDER,true);
+  if(ZXing.DecodeHintType?.POSSIBLE_FORMATS){
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[
+      ZXing.BarcodeFormat.EAN_13,
+      ZXing.BarcodeFormat.EAN_8,
+      ZXing.BarcodeFormat.UPC_A,
+      ZXing.BarcodeFormat.UPC_E,
+      ZXing.BarcodeFormat.CODE_128,
+      ZXing.BarcodeFormat.CODE_39,
+      ZXing.BarcodeFormat.DATA_MATRIX,
+      ZXing.BarcodeFormat.QR_CODE
+    ].filter(Boolean));
+  }
+  return new ZXing.BrowserMultiFormatReader(hints,100);
+}
+
+async function applyCameraEnhancements(){
+  try{
+    const track=stream?.getVideoTracks?.()[0];
+    if(!track) return;
+    const caps=track.getCapabilities?.()||{};
+    const advanced=[];
+    if(Array.isArray(caps.focusMode) && caps.focusMode.includes('continuous')) advanced.push({focusMode:'continuous'});
+    if(Array.isArray(caps.exposureMode) && caps.exposureMode.includes('continuous')) advanced.push({exposureMode:'continuous'});
+    if(caps.zoom){
+      const target=Math.min(Math.max(1.25,caps.zoom.min||1),caps.zoom.max||1.25);
+      advanced.push({zoom:target});
+    }
+    if(advanced.length) await track.applyConstraints({advanced});
+  }catch(e){ console.debug('camera enhancement unavailable',e); }
+}
+
 async function startLive(){
  if(!window.isSecureContext){
    statusEl.textContent='目前不是安全網頁環境（HTTPS / localhost），瀏覽器可能禁止即時相機。請改用「拍照掃碼」。';
@@ -105,17 +140,33 @@ async function startLive(){
    statusEl.textContent='這個開啟方式不支援即時鏡頭，請使用「拍照掃碼」。'; return;
  }
  try{
-   stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
-   video.srcObject=stream; await video.play(); scanning=true;
-   if('BarcodeDetector' in window){
-      let fmts=await BarcodeDetector.getSupportedFormats();
-      detector=new BarcodeDetector({formats:fmts});
+   stream=await navigator.mediaDevices.getUserMedia({
+     video:{
+       facingMode:{ideal:'environment'},
+       width:{ideal:1920},
+       height:{ideal:1080},
+       frameRate:{ideal:30,min:15}
+     },
+     audio:false
+   });
+   video.srcObject=stream;
+   await video.play();
+   await applyCameraEnhancements();
+   scanning=true;
+
+   // 高敏感度模式優先使用 ZXing TRY_HARDER；原生偵測器作為備援。
+   if(window.ZXing){
+      zxingReader=makeZXingReader();
+      statusEl.textContent='高敏感度即時掃描中… 請讓條碼佔畫面約 1/3～1/2';
+      zxingReader.decodeFromVideoElementContinuously(video,(result,err)=>{
+        if(result) gotCode(result.getText());
+      });
+   }else if('BarcodeDetector' in window){
+      const fmts=await BarcodeDetector.getSupportedFormats();
+      const preferred=['ean_13','ean_8','upc_a','upc_e','code_128','code_39','data_matrix','qr_code'].filter(x=>fmts.includes(x));
+      detector=new BarcodeDetector({formats:preferred.length?preferred:fmts});
       statusEl.textContent='即時掃描中…';
       liveLoop();
-   }else if(window.ZXing){
-      zxingReader=new ZXing.BrowserMultiFormatReader();
-      statusEl.textContent='即時掃描中…';
-      zxingReader.decodeFromVideoElementContinuously(video,(result,err)=>{if(result) gotCode(result.getText())});
    }else{
       statusEl.textContent='已開啟鏡頭，但掃碼元件載入失敗。';
    }
@@ -126,8 +177,11 @@ async function startLive(){
 }
 async function liveLoop(){
  if(!scanning||!detector)return;
- try{const r=await detector.detect(video); if(r?.[0]?.rawValue) gotCode(r[0].rawValue)}catch{}
- requestAnimationFrame(liveLoop);
+ try{
+   const r=await detector.detect(video);
+   if(r?.[0]?.rawValue) gotCode(r[0].rawValue);
+ }catch{}
+ if(scanning) setTimeout(liveLoop,60);
 }
 function stop(){
  scanning=false;
@@ -147,7 +201,7 @@ document.getElementById('photoInput').addEventListener('change',async e=>{
    const img=new Image();
    img.onload=async()=>{
      try{
-       const reader=new ZXing.BrowserMultiFormatReader();
+       const reader=makeZXingReader() || new ZXing.BrowserMultiFormatReader();
        const result=await reader.decodeFromImageElement(img);
        gotCode(result.getText());
      }catch(err){
