@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>藥品掃碼登記</title>
+<script src="https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js"></script>
+<style>
+:root{color-scheme:light dark;--bg:#f5f7fb;--card:#fff;--text:#172033;--muted:#68748a;--line:#d9e0ea;--accent:#276ef1;--danger:#c93737}
+@media(prefers-color-scheme:dark){:root{--bg:#11141a;--card:#181d25;--text:#f1f5fb;--muted:#a7b0c0;--line:#2d3542;--accent:#6fa1ff;--danger:#ff7777}}
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",sans-serif;background:var(--bg);color:var(--text)}
+.wrap{width:min(900px,100%);margin:auto;padding:16px}h1{font-size:26px;margin:8px 0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:16px;margin-bottom:14px}
+.scanner{position:relative;overflow:hidden;border-radius:14px;background:#000;aspect-ratio:16/10;display:grid;place-items:center}
+video{width:100%;height:100%;object-fit:cover}
+.guide{position:absolute;width:76%;height:34%;border:2px solid #fff;border-radius:14px;box-shadow:0 0 0 999px rgba(0,0,0,.24);pointer-events:none}
+.hint{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.58);color:#fff;padding:6px 10px;border-radius:999px;font-size:13px;white-space:nowrap}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}@media(max-width:650px){.row{grid-template-columns:1fr}}
+label{display:block;font-size:13px;color:var(--muted);margin-bottom:6px}
+input{width:100%;padding:12px 13px;border:1px solid var(--line);background:transparent;color:var(--text);border-radius:12px;font-size:16px}
+.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+button,.filebtn{border:0;border-radius:12px;padding:10px 14px;font-size:15px;font-weight:600;cursor:pointer;background:var(--accent);color:white;display:inline-flex;align-items:center;justify-content:center}
+.secondary{background:transparent!important;color:var(--text)!important;border:1px solid var(--line)!important}
+.danger{background:transparent!important;color:var(--danger)!important;border:1px solid var(--line)!important}
+.status{color:var(--muted);font-size:14px;margin-top:10px;line-height:1.5}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:11px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted)}.empty{color:var(--muted);text-align:center;padding:26px 0}
+.notice{padding:12px;border:1px solid var(--line);border-radius:12px;color:var(--muted);font-size:14px;margin-bottom:12px}
+</style>
+</head>
+<body>
+<main class="wrap">
+<h1>藥品掃碼登記</h1>
+
+<section class="card">
+<div class="notice">
+若「開始即時掃描」無法開啟相機，請改用 <b>拍照掃碼</b>。直接開啟 HTML 檔時，iPhone 常會限制即時鏡頭，但拍照上傳通常仍可使用。
+</div>
+<div class="scanner">
+<video id="video" playsinline muted></video>
+<div class="guide"></div>
+<div class="hint">將條碼置於框內</div>
+</div>
+<div class="actions">
+<button id="startBtn">開始即時掃描</button>
+<label class="filebtn" for="photoInput">拍照掃碼</label>
+<input id="photoInput" type="file" accept="image/*" capture="environment" hidden>
+<button class="secondary" id="stopBtn">停止鏡頭</button>
+</div>
+<div class="status" id="scanStatus">尚未掃描</div>
+</section>
+
+<section class="card">
+<div class="row">
+<div><label>條碼 / GTIN</label><input id="barcode" inputmode="numeric" placeholder="掃描或手動輸入"></div>
+<div><label>藥品名稱</label><input id="drugName" placeholder="例如 普拿疼膜衣錠"></div>
+</div>
+<div class="row" style="margin-top:10px">
+<div><label>規格 / 含量</label><input id="strength" placeholder="例如 500 mg/tab"></div>
+<div><label>備註</label><input id="note" placeholder="例如 3A 藥櫃"></div>
+</div>
+<div class="actions">
+<button id="addBtn">加入名單</button>
+<button class="secondary" id="clearFormBtn">清除欄位</button>
+</div>
+</section>
+
+<section class="card">
+<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap">
+<strong>已登記藥品 <span id="count"></span></strong>
+<div class="actions" style="margin-top:0">
+<button class="secondary" id="exportBtn">匯出 CSV</button>
+<button class="danger" id="clearAllBtn">清空全部</button>
+</div>
+</div>
+<div style="overflow:auto;margin-top:10px">
+<table><thead><tr><th>條碼</th><th>藥名</th><th>規格</th><th>備註</th><th></th></tr></thead><tbody id="tbody"></tbody></table>
+<div id="empty" class="empty">尚未登記藥品</div>
+</div>
+</section>
+</main>
+
+<script>
+const KEY='drug_registry_v2';
+const video=document.getElementById('video'),statusEl=document.getElementById('scanStatus');
+const barcode=document.getElementById('barcode'),drugName=document.getElementById('drugName'),strength=document.getElementById('strength'),note=document.getElementById('note');
+let stream=null, detector=null, scanning=false, zxingReader=null;
+
+function items(){try{return JSON.parse(localStorage.getItem(KEY)||'[]')}catch{return[]}}
+function save(x){localStorage.setItem(KEY,JSON.stringify(x))}
+function esc(s=''){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function render(){
+ const a=items(); document.getElementById('count').textContent=`(${a.length})`; const tb=document.getElementById('tbody'); tb.innerHTML='';
+ document.getElementById('empty').style.display=a.length?'none':'block';
+ a.forEach((x,i)=>{const tr=document.createElement('tr');tr.innerHTML=`<td>${esc(x.barcode)}</td><td><b>${esc(x.name)}</b></td><td>${esc(x.strength)}</td><td>${esc(x.note)}</td><td><button class="danger" data-i="${i}" style="padding:6px 9px">刪除</button></td>`;tb.appendChild(tr)})
+}
+document.getElementById('tbody').onclick=e=>{const b=e.target.closest('[data-i]');if(!b)return;const a=items();a.splice(+b.dataset.i,1);save(a);render()}
+function gotCode(raw){if(!raw)return;barcode.value=raw;statusEl.textContent='已讀取：'+raw;if(navigator.vibrate)navigator.vibrate(60);drugName.focus()}
+
+async function startLive(){
+ if(!window.isSecureContext){
+   statusEl.textContent='目前不是安全網頁環境（HTTPS / localhost），瀏覽器可能禁止即時相機。請改用「拍照掃碼」。';
+ }
+ if(!navigator.mediaDevices?.getUserMedia){
+   statusEl.textContent='這個開啟方式不支援即時鏡頭，請使用「拍照掃碼」。'; return;
+ }
+ try{
+   stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+   video.srcObject=stream; await video.play(); scanning=true;
+   if('BarcodeDetector' in window){
+      let fmts=await BarcodeDetector.getSupportedFormats();
+      detector=new BarcodeDetector({formats:fmts});
+      statusEl.textContent='即時掃描中…';
+      liveLoop();
+   }else if(window.ZXing){
+      zxingReader=new ZXing.BrowserMultiFormatReader();
+      statusEl.textContent='即時掃描中…';
+      zxingReader.decodeFromVideoElementContinuously(video,(result,err)=>{if(result) gotCode(result.getText())});
+   }else{
+      statusEl.textContent='已開啟鏡頭，但掃碼元件載入失敗。';
+   }
+ }catch(e){
+   console.error(e);
+   statusEl.textContent='無法開啟即時相機。請按「拍照掃碼」；若要即時掃描，需用 HTTPS 網址開啟。';
+ }
+}
+async function liveLoop(){
+ if(!scanning||!detector)return;
+ try{const r=await detector.detect(video); if(r?.[0]?.rawValue) gotCode(r[0].rawValue)}catch{}
+ requestAnimationFrame(liveLoop);
+}
+function stop(){
+ scanning=false;
+ if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
+ if(zxingReader){try{zxingReader.reset()}catch{} zxingReader=null}
+ video.srcObject=null; statusEl.textContent='鏡頭已停止';
+}
+document.getElementById('startBtn').onclick=startLive;
+document.getElementById('stopBtn').onclick=stop;
+
+document.getElementById('photoInput').addEventListener('change',async e=>{
+ const file=e.target.files?.[0]; if(!file)return;
+ statusEl.textContent='正在辨識照片…';
+ try{
+   if(!window.ZXing) throw new Error('ZXing not loaded');
+   const url=URL.createObjectURL(file);
+   const img=new Image();
+   img.onload=async()=>{
+     try{
+       const reader=new ZXing.BrowserMultiFormatReader();
+       const result=await reader.decodeFromImageElement(img);
+       gotCode(result.getText());
+     }catch(err){
+       statusEl.textContent='照片中沒有辨識到條碼，請靠近一點、保持清楚並避免反光。';
+     }finally{URL.revokeObjectURL(url);e.target.value=''}
+   };
+   img.src=url;
+ }catch(err){
+   statusEl.textContent='掃碼元件沒有載入。請確認目前裝置有網路連線後再試一次。';
+ }
+});
+
+document.getElementById('addBtn').onclick=()=>{
+ const b=barcode.value.trim(),n=drugName.value.trim();if(!b)return alert('請先輸入條碼');if(!n)return alert('請輸入藥品名稱');
+ const a=items();a.unshift({barcode:b,name:n,strength:strength.value.trim(),note:note.value.trim()});save(a);render();
+ barcode.value=drugName.value=strength.value=note.value='';
+}
+document.getElementById('clearFormBtn').onclick=()=>{barcode.value=drugName.value=strength.value=note.value=''}
+document.getElementById('clearAllBtn').onclick=()=>{if(confirm('確定清空全部？')){localStorage.removeItem(KEY);render()}}
+document.getElementById('exportBtn').onclick=()=>{
+ const a=items();if(!a.length)return alert('目前沒有資料');
+ const rows=[['條碼','藥品名稱','規格/含量','備註'],...a.map(x=>[x.barcode,x.name,x.strength,x.note])];
+ const csv='\uFEFF'+rows.map(r=>r.map(v=>`"${String(v??'').replaceAll('"','""')}"`).join(',')).join('\r\n');
+ const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),u=URL.createObjectURL(blob),link=document.createElement('a');
+ link.href=u;link.download='drug-list.csv';link.click();URL.revokeObjectURL(u);
+}
+render();
+</script>
+</body>
+</html>
